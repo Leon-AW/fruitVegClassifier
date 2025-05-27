@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+fruit_detector/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+*.crdownload
+
+# IDE / Editor specific (common examples)
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Datasets & Large Files
+archive.zip
+fruit_classifier_project/fruits-360_original-size/
+fruit_classifier_project/fruits-360_100x100/
+fruit_classifier_project/backgrounds/
+fruit_classifier_project/user_corrected_data/
+
+# Trained Models
+fruit_classifier_project/*.keras
+fruit_classifier_project/*.h5
+
+# Output files from training/visualization
+fruit_classifier_project/sample_augmented_batch.png
+fruit_classifier_project/training_validation_accuracy.png
+fruit_classifier_project/training_validation_loss.png
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# TensorFlow / Keras logs (if you use TensorBoard)
+logs/
+.tensorboard/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# User-uploaded data (if any, besides what's specified)
+# e.g. uploads/
+
+# Secrets or config files that shouldn't be in repo
+# e.g. *.env
+# e.g. config.ini (if it contains secrets) 
