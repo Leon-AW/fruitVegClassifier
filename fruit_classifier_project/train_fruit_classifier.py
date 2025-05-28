@@ -8,6 +8,51 @@ import sys # ADDED
 import glob # Added for finding background files
 import cv2 # Added for OpenCV image processing
 
+# --- GPU/MPS Configuration ---
+print("TensorFlow version:", tf.__version__)
+
+# Configure GPU/MPS usage
+gpus = tf.config.list_physical_devices('GPU')
+mps_devices = tf.config.list_physical_devices('MPS') if hasattr(tf.config, 'list_physical_devices') else []
+
+device_info = "CPU"
+if gpus:
+    try:
+        # Configure GPU memory growth to avoid allocating all GPU memory at once
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        device_info = f"GPU ({len(gpus)} device(s))"
+        print(f"GPU devices found: {len(gpus)}")
+        for i, gpu in enumerate(gpus):
+            print(f"  GPU {i}: {gpu}")
+    except RuntimeError as e:
+        print(f"GPU configuration error: {e}")
+        device_info = "CPU (GPU config failed)"
+elif mps_devices:
+    try:
+        # Apple Silicon MPS (Metal Performance Shaders) support
+        device_info = "MPS (Apple Silicon GPU)"
+        print("MPS (Apple Silicon GPU) device found and will be used for training.")
+        print("Note: MPS provides GPU acceleration on Apple Silicon Macs (M1/M2/M3/M4).")
+    except RuntimeError as e:
+        print(f"MPS configuration error: {e}")
+        device_info = "CPU (MPS config failed)"
+else:
+    print("No GPU or MPS devices found. Using CPU for training.")
+    device_info = "CPU"
+
+print(f"Training will use: {device_info}")
+
+# Set mixed precision policy for better performance on compatible hardware
+if gpus or mps_devices:
+    try:
+        # Mixed precision can significantly speed up training on modern GPUs and Apple Silicon
+        policy = tf.keras.mixed_precision.Policy('mixed_float16')
+        tf.keras.mixed_precision.set_global_policy(policy)
+        print("Mixed precision (float16) enabled for faster training.")
+    except Exception as e:
+        print(f"Mixed precision setup failed: {e}. Using default float32.")
+
 # --- Base Directory ---
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -19,31 +64,53 @@ DATASET_NAME_DEFAULT = 'fruits-360_original-size'
 DATASET_FOLDER_DEFAULT = 'fruits-360-original-size' # Subfolder within the archive name
 BACKGROUNDS_DIR_NAME_DEFAULT = 'backgrounds'
 HAS_DEDICATED_VALIDATION_DEFAULT = True
+MODEL_ARCH_DEFAULT = 'mobilenet'
 
-# Check for '100' argument for 100x100 version
-if len(sys.argv) > 1 and sys.argv[1] == '100':
-    print("Using 100x100 dataset configuration.")
-    IMG_WIDTH_CFG = 100
-    IMG_HEIGHT_CFG = 100
-    DATASET_NAME_CFG = 'fruits-360_100x100'
-    DATASET_FOLDER_CFG = 'fruits-360' # Subfolder for 100x100 dataset
-    BACKGROUNDS_DIR_NAME_CFG = 'backgrounds100x100'
-    HAS_DEDICATED_VALIDATION_CFG = False
-else:
+# Parse command line arguments
+IMG_WIDTH_CFG = IMG_WIDTH_DEFAULT
+IMG_HEIGHT_CFG = IMG_HEIGHT_DEFAULT
+DATASET_NAME_CFG = DATASET_NAME_DEFAULT
+DATASET_FOLDER_CFG = DATASET_FOLDER_DEFAULT
+BACKGROUNDS_DIR_NAME_CFG = BACKGROUNDS_DIR_NAME_DEFAULT
+HAS_DEDICATED_VALIDATION_CFG = HAS_DEDICATED_VALIDATION_DEFAULT
+MODEL_ARCH_CFG = MODEL_ARCH_DEFAULT
+
+i = 1
+while i < len(sys.argv):
+    arg = sys.argv[i]
+    if arg == '100':
+        print("Using 100x100 dataset configuration.")
+        IMG_WIDTH_CFG = 100
+        IMG_HEIGHT_CFG = 100
+        DATASET_NAME_CFG = 'fruits-360_100x100'
+        DATASET_FOLDER_CFG = 'fruits-360' 
+        BACKGROUNDS_DIR_NAME_CFG = 'backgrounds100x100'
+        HAS_DEDICATED_VALIDATION_CFG = False
+        i += 1
+    elif arg == 'arch' and i + 1 < len(sys.argv):
+        if sys.argv[i+1].lower() == 'efficientnet':
+            MODEL_ARCH_CFG = 'efficientnet'
+            print("Using EfficientNetB3 model architecture.")
+        elif sys.argv[i+1].lower() == 'mobilenet':
+            MODEL_ARCH_CFG = 'mobilenet'
+            print("Using MobileNetV2 model architecture.")
+        else:
+            print(f"Warning: Unrecognized architecture '{sys.argv[i+1]}'. Using default MobileNetV2.")
+        i += 2
+    else:
+        print(f"Warning: Unrecognized argument: {arg}")
+        i += 1
+
+if len(sys.argv) == 1:
     print("Using default (original size) dataset configuration.")
-    IMG_WIDTH_CFG = IMG_WIDTH_DEFAULT
-    IMG_HEIGHT_CFG = IMG_HEIGHT_DEFAULT
-    DATASET_NAME_CFG = DATASET_NAME_DEFAULT
-    DATASET_FOLDER_CFG = DATASET_FOLDER_DEFAULT
-    BACKGROUNDS_DIR_NAME_CFG = BACKGROUNDS_DIR_NAME_DEFAULT
-    HAS_DEDICATED_VALIDATION_CFG = HAS_DEDICATED_VALIDATION_DEFAULT
+    print("Using default MobileNetV2 model architecture.")
 
-# --- Constants ---
 IMG_WIDTH = IMG_WIDTH_CFG
 IMG_HEIGHT = IMG_HEIGHT_CFG
 IMAGE_SIZE = (IMG_WIDTH, IMG_HEIGHT)
 BATCH_SIZE = 32 # This can be made configurable too if needed in future
 BUFFER_SIZE = tf.data.AUTOTUNE
+MODEL_ARCH = MODEL_ARCH_CFG
 
 # Paths (derived from config)
 # base_dir is defined above
@@ -169,8 +236,7 @@ def tf_replace_background(image_tensor, label):
 
 # --- Load Data ---
 print("Loading main training data...")
-# Ensure class_names is populated before it might be used by user_added_dataset
-if not class_names: # Should have been populated by the NUM_CLASSES section
+if not class_names: 
     print("Error: class_names not defined before loading data. Exiting.")
     exit()
 
@@ -180,10 +246,18 @@ main_train_dataset = tf.keras.utils.image_dataset_from_directory(
     label_mode='categorical',
     image_size=IMAGE_SIZE,
     interpolation='nearest',
-    batch_size=BATCH_SIZE,
+    batch_size=BATCH_SIZE, # Loaded batched initially
     shuffle=True,
     seed=42
 )
+
+# --- Prepare main_train_dataset: unbatch and cast to float32 BEFORE concatenation ---
+print("Preparing main training data (unbatching and casting to float32)...")
+main_train_dataset_unbatched = main_train_dataset.unbatch()
+def cast_image_to_float32(image, label):
+    return tf.cast(image, tf.float32), label
+main_train_dataset_unbatched_float32 = main_train_dataset_unbatched.map(cast_image_to_float32, num_parallel_calls=tf.data.AUTOTUNE)
+# main_train_dataset is now unbatched and has float32 images.
 
 print("Loading main validation data...")
 validation_dataset = tf.keras.utils.image_dataset_from_directory(
@@ -192,69 +266,141 @@ validation_dataset = tf.keras.utils.image_dataset_from_directory(
     label_mode='categorical',
     image_size=IMAGE_SIZE,
     interpolation='nearest',
-    batch_size=BATCH_SIZE,
+    batch_size=BATCH_SIZE, # Loaded batched initially
     shuffle=False
 )
 
-# Initialize train_dataset with the main training data
-train_dataset = main_train_dataset
+# --- Prepare validation_dataset: unbatch and cast to float32 ---
+print("Preparing validation data (unbatching and casting to float32)...")
+validation_dataset_unbatched = validation_dataset.unbatch()
+validation_dataset_unbatched_float32 = validation_dataset_unbatched.map(cast_image_to_float32, num_parallel_calls=tf.data.AUTOTUNE)
+# validation_dataset is now unbatched and has float32 images.
 
-# --- Load User Corrected Data (if available) ---
-user_corrected_images_loaded = False
+# Initialize train_dataset with the processed main training data
+train_dataset = main_train_dataset_unbatched_float32 
+
+# Initialize validation_dataset with the processed main validation data
+# This will be the base for validation, to which user-corrected validation samples are added
+current_validation_dataset = validation_dataset_unbatched_float32
+
+# --- Load User Corrected Data (if available) and split for train/validation ---
+user_corrected_images_loaded_to_train = False
+user_corrected_images_loaded_to_val = False
+
 if os.path.exists(user_corrected_data_path) and any(os.scandir(user_corrected_data_path)):
     print(f"Found user_corrected_data directory at: {user_corrected_data_path}")
     try:
         user_class_dirs = [d.name for d in os.scandir(user_corrected_data_path) if d.is_dir()]
         if user_class_dirs:
             print(f"User corrected class directories found: {user_class_dirs[:5]}...")
-            user_added_dataset = tf.keras.utils.image_dataset_from_directory(
-                user_corrected_data_path,
-                labels='inferred',
-                label_mode='categorical',
-                class_names=class_names,  # Use pre-determined class_names for consistency
-                image_size=IMAGE_SIZE,
-                interpolation='nearest',
-                batch_size=BATCH_SIZE, # Load batched
-                shuffle=True # Shuffle this dataset too
-            )
-            print("User corrected data loaded. Concatenating with main training data.")
-            train_dataset = train_dataset.concatenate(user_added_dataset)
-            user_corrected_images_loaded = True
-        else:
-            print("User corrected data directory is empty or has no class subdirectories. Skipping.")
-    except Exception as e:
-        print(f"Could not load user corrected data: {e}. Using only main training data.")
-else:
-    print(f"User corrected data directory not found or is empty at {user_corrected_data_path}. Using only main training data.")
+            
+            user_train_image_paths = []
+            user_train_labels = []
+            user_val_image_paths = []
+            user_val_labels = []
+            
+            for class_dir_name in user_class_dirs:
+                class_dir_path = os.path.join(user_corrected_data_path, class_dir_name)
+                if class_dir_name not in class_names:
+                    print(f"Warning: User corrected class '{class_dir_name}' not found in main dataset classes. Skipping.")
+                    continue
+                
+                class_index = class_names.index(class_dir_name)
+                image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.gif']
+                class_image_paths_for_class = []
+                for ext in image_extensions:
+                    class_image_paths_for_class.extend(glob.glob(os.path.join(class_dir_path, ext)))
+                    class_image_paths_for_class.extend(glob.glob(os.path.join(class_dir_path, ext.upper())))
+                
+                if class_image_paths_for_class:
+                    np.random.shuffle(class_image_paths_for_class) # Shuffle before splitting
+                    num_images_in_class = len(class_image_paths_for_class)
+                    
+                    # Split: ~20% for validation, rest for training (per class)
+                    num_val_samples_for_class = round(num_images_in_class * 0.2)
+                    num_train_samples_for_class = num_images_in_class - num_val_samples_for_class
 
+                    current_class_train_paths = class_image_paths_for_class[:num_train_samples_for_class]
+                    current_class_val_paths = class_image_paths_for_class[num_train_samples_for_class:]
+                    
+                    if current_class_train_paths:
+                        user_train_image_paths.extend(current_class_train_paths)
+                        user_train_labels.extend([class_index] * len(current_class_train_paths))
+                        print(f"  Added {len(current_class_train_paths)} images from '{class_dir_name}' to user training set.")
+                    
+                    if current_class_val_paths:
+                        user_val_image_paths.extend(current_class_val_paths)
+                        user_val_labels.extend([class_index] * len(current_class_val_paths))
+                        print(f"  Added {len(current_class_val_paths)} images from '{class_dir_name}' to user validation set.")
+            
+            # Function to load and preprocess user images (common for train and val splits)
+            def load_and_preprocess_user_image(image_path, label):
+                image = tf.io.read_file(image_path)
+                image = tf.image.decode_image(image, channels=3, expand_animations=False)
+                image = tf.cast(image, tf.float32) 
+                image = tf.image.resize(image, [IMG_HEIGHT, IMG_WIDTH], method='nearest')
+                image.set_shape([IMG_HEIGHT, IMG_WIDTH, 3])
+                label_one_hot = tf.one_hot(label, NUM_CLASSES)
+                label_one_hot.set_shape([NUM_CLASSES])
+                return image, label_one_hot
+
+            if user_train_image_paths:
+                print(f"Total user corrected images for training: {len(user_train_image_paths)}")
+                user_train_dataset = tf.data.Dataset.from_tensor_slices((user_train_image_paths, user_train_labels))
+                user_train_dataset = user_train_dataset.map(load_and_preprocess_user_image, num_parallel_calls=tf.data.AUTOTUNE)
+                user_train_dataset = user_train_dataset.shuffle(len(user_train_image_paths))
+                train_dataset = train_dataset.concatenate(user_train_dataset)
+                user_corrected_images_loaded_to_train = True
+                print("User corrected training data concatenated.")
+            else:
+                print("No valid user corrected images found for the training split.")
+
+            if user_val_image_paths:
+                print(f"Total user corrected images for validation: {len(user_val_image_paths)}")
+                user_val_dataset = tf.data.Dataset.from_tensor_slices((user_val_image_paths, user_val_labels))
+                user_val_dataset = user_val_dataset.map(load_and_preprocess_user_image, num_parallel_calls=tf.data.AUTOTUNE)
+                # Shuffling validation part of user data is optional, but good for consistency before potential batching
+                user_val_dataset = user_val_dataset.shuffle(len(user_val_image_paths))
+                current_validation_dataset = current_validation_dataset.concatenate(user_val_dataset) 
+                user_corrected_images_loaded_to_val = True
+                print("User corrected validation data concatenated.")
+            else:
+                print("No valid user corrected images found for the validation split.")
+        else:
+            print("User corrected data directory is empty or has no class subdirectories. Skipping user data.")
+    except Exception as e:
+        print(f"Could not load or split user corrected data: {e}. Using only main dataset.")
+        import traceback
+        traceback.print_exc()
+else:
+    print(f"User corrected data directory not found or is empty at {user_corrected_data_path}. Skipping user data.")
+
+# Reassign the potentially augmented validation_dataset
+validation_dataset = current_validation_dataset
 
 # --- Apply Background Replacement (if backgrounds are available) ---
-# This needs to operate on unbatched data and then re-batch.
+# train_dataset is already unbatched and has float32 images.
+# validation_dataset is also unbatched and has float32 images.
 if background_image_paths:
     print("\nApplying background replacement to training dataset...")
-    train_dataset = train_dataset.unbatch() # Unbatch the (potentially concatenated) dataset
+    # train_dataset = train_dataset.unbatch() # This was the redundant call, removed
     train_dataset = train_dataset.map(tf_replace_background, num_parallel_calls=tf.data.AUTOTUNE)
-    # Batching will happen after potential shuffling later
     print("Background replacement mapping applied to training dataset.")
 
     print("\nApplying background replacement to validation dataset...")
-    validation_dataset = validation_dataset.unbatch()
+    # validation_dataset = validation_dataset.unbatch() # Already unbatched
+    # validation_dataset = validation_dataset.map(cast_image_to_float32, num_parallel_calls=tf.data.AUTOTUNE) # Already float32
     validation_dataset = validation_dataset.map(tf_replace_background, num_parallel_calls=tf.data.AUTOTUNE)
-    # Batching will happen later for validation dataset as well
     print("Background replacement mapping applied to validation dataset.")
 else:
     print("\nSkipping background replacement as no background images were found.")
 
 
 # --- Configure dataset for performance ---
-SHUFFLE_BUFFER_SIZE = 1000 # Buffer size for shuffling
-
-# Shuffle the unbatched training data (important after concatenation and mapping)
+SHUFFLE_BUFFER_SIZE = 1000 
 train_dataset = train_dataset.shuffle(SHUFFLE_BUFFER_SIZE)
-
-# Now batch the datasets
-train_dataset = train_dataset.batch(BATCH_SIZE).prefetch(buffer_size=BUFFER_SIZE)
-validation_dataset = validation_dataset.batch(BATCH_SIZE).prefetch(buffer_size=BUFFER_SIZE)
+train_dataset = train_dataset.batch(BATCH_SIZE).prefetch(buffer_size=BUFFER_SIZE).repeat()
+validation_dataset = validation_dataset.batch(BATCH_SIZE).prefetch(buffer_size=BUFFER_SIZE).repeat()
 
 # Test dataset (remains separate and doesn't get these augmentations/concatenations)
 print("Loading test data...")
@@ -283,25 +429,23 @@ data_augmentation = tf.keras.Sequential([
 ])
 
 # --- Preprocessing Layer (Normalization) ---
-# MobileNetV2 expects inputs in the range [-1, 1]
-# We can use the built-in preprocess_input function or a Rescaling layer
-# If using tf.keras.applications.mobilenet_v2.preprocess_input,
-# it needs to be applied after batching and before the model.
-# Alternatively, a Rescaling layer is simpler if inputs are 0-255 initially.
-# image_dataset_from_directory loads images with pixel values in [0, 255].
-# So, we rescale to [-1, 1].
-preprocess_input_layer = tf.keras.layers.Rescaling(1./127.5, offset=-1)
+# Different architectures require different preprocessing
+if MODEL_ARCH == 'efficientnet':
+    # EfficientNet expects inputs in the range [0, 1]
+    preprocess_input_layer = tf.keras.layers.Rescaling(1./255.0)
+    print("Using EfficientNet preprocessing (rescaling to [0, 1]).")
+else:
+    # MobileNetV2 expects inputs in the range [-1, 1]
+    preprocess_input_layer = tf.keras.layers.Rescaling(1./127.5, offset=-1)
+    print("Using MobileNet preprocessing (rescaling to [-1, 1]).")
 
 # --- Visualization of a Sample Batch (Sanity Check) ---
-# Ensure class_names is available for visualization titles
 if not class_names:
     print("Warning: class_names not defined for visualization. Titles may be incorrect.")
 
-def show_sample_batch(dataset_to_visualize, augmentation_layer, num_total_samples=16): # num_total_samples is now a cap
+def show_sample_batch(dataset_to_visualize, augmentation_layer, num_total_samples=16):
     """Shows a few samples from a dataset after applying augmentation."""
     try:
-        # dataset_to_visualize is expected to be a dataset that yields at least one batch.
-        # Example: train_dataset.take(1)
         sample_images, sample_labels = next(iter(dataset_to_visualize))
     except tf.errors.OutOfRangeError:
         print("Warning: Could not get enough samples for visualization (dataset was empty). Skipping visualization.")
@@ -311,23 +455,18 @@ def show_sample_batch(dataset_to_visualize, augmentation_layer, num_total_sample
         return
     
     augmented_images = augmentation_layer(sample_images, training=True) 
-
-    # Determine how many images to actually show based on batch size and requested number
-    num_to_show = min(num_total_samples, augmented_images.shape[0], BATCH_SIZE) # Cap at BATCH_SIZE or less if batch is smaller
+    num_to_show = min(num_total_samples, augmented_images.shape[0], BATCH_SIZE)
     
     if num_to_show == 0:
         print("Warning: No images to show in the visualization batch.")
         return
 
-    # Adjust subplot grid: aim for a somewhat square layout e.g. 4x4 for 16, 3x3 for 9, 2x2 for 4
     cols = int(np.ceil(np.sqrt(num_to_show)))
     rows = int(np.ceil(num_to_show / cols))
 
-    plt.figure(figsize=(cols * 3, rows * 3)) # Adjust figure size based on grid
+    plt.figure(figsize=(cols * 3, rows * 3))
     for i in range(num_to_show):
         ax = plt.subplot(rows, cols, i + 1)
-        # Images from train_dataset are float32 [0, 255] after background replacement.
-        # Augmentation layer doesn't change this range.
         plt.imshow(augmented_images[i].numpy().astype("uint8")) 
         class_index = np.argmax(sample_labels[i])
         plt.title(class_names[class_index] if class_names and class_index < len(class_names) else f"Class {class_index}", fontsize=8)
@@ -338,44 +477,60 @@ def show_sample_batch(dataset_to_visualize, augmentation_layer, num_total_sample
     plt.savefig(visualization_path)
     print(f"\nSaved sample augmented batch visualization to {visualization_path}")
 
-# Show samples before training begins
-# The train_dataset is already batched and should have background replacement applied.
-# The data_augmentation layer will be applied by the show_sample_batch function.
 print("\nVisualizing a sample batch from the processed training data (backgrounds should be replaced)...")
-visualization_batch_dataset = train_dataset.take(1) # Take one batch from the fully processed train_dataset
+visualization_batch_dataset = train_dataset.take(1)
 
 if visualization_batch_dataset:
-    # Pass the dataset (which will yield one batch) and the augmentation layer
-    # num_total_samples in show_sample_batch will cap how many from the batch are shown (e.g. up to 16)
     show_sample_batch(visualization_batch_dataset, data_augmentation, num_total_samples=16)
 else:
     print("Could not get a batch from train_dataset for visualization.")
 
-
 # --- Build the Model ---
-def build_model(num_classes, augmentation_model, preprocessing_layer):
-    # Base Model: MobileNetV2
-    base_model = tf.keras.applications.MobileNetV2(
-        input_shape=(IMG_WIDTH, IMG_HEIGHT, 3),
-        include_top=False, # Exclude ImageNet classifier
-        weights='imagenet'  # Load pre-trained weights
-    )
-    base_model.trainable = False # Freeze the base model
+def build_model(num_classes, augmentation_model, preprocessing_layer, architecture='mobilenet'):
+    """
+    Build a transfer learning model with the specified architecture.
+    
+    Args:
+        num_classes: Number of output classes
+        augmentation_model: Data augmentation layers
+        preprocessing_layer: Preprocessing layer for the chosen architecture
+        architecture: Either 'mobilenet' or 'efficientnet'
+    """
+    if architecture == 'efficientnet':
+        # EfficientNetB3
+        base_model = tf.keras.applications.EfficientNetB3(
+            input_shape=(IMG_WIDTH, IMG_HEIGHT, 3),
+            include_top=False,
+            weights='imagenet'
+        )
+        print(f"Using EfficientNetB3 with input shape ({IMG_WIDTH}, {IMG_HEIGHT}, 3)")
+    else:
+        # MobileNetV2 (default)
+        base_model = tf.keras.applications.MobileNetV2(
+            input_shape=(IMG_WIDTH, IMG_HEIGHT, 3),
+            include_top=False,
+            weights='imagenet'
+        )
+        print(f"Using MobileNetV2 with input shape ({IMG_WIDTH}, {IMG_HEIGHT}, 3)")
+    
+    base_model.trainable = False  # Freeze the base model
 
     # Create new model on top
     inputs = tf.keras.Input(shape=(IMG_WIDTH, IMG_HEIGHT, 3))
     x = augmentation_model(inputs)       # Apply data augmentation
-    x = preprocessing_layer(x)           # Apply preprocessing (rescaling for MobileNetV2)
-    x = base_model(x, training=False)  # Set training=False as base_model is frozen
+    x = preprocessing_layer(x)           # Apply preprocessing
+    x = base_model(x, training=False)    # Set training=False as base_model is frozen
     x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dropout(0.2)(x) # Regularization
-    outputs = layers.Dense(num_classes, activation='softmax')(x)
+    x = layers.Dropout(0.2)(x)           # Regularization
+    
+    # Ensure final layer uses float32 for numerical stability with mixed precision
+    outputs = layers.Dense(num_classes, activation='softmax', dtype='float32')(x)
 
     model = tf.keras.Model(inputs, outputs)
     return model
 
-print("\nBuilding model...")
-model = build_model(NUM_CLASSES, data_augmentation, preprocess_input_layer)
+print(f"\nBuilding model with {MODEL_ARCH} architecture...")
+model = build_model(NUM_CLASSES, data_augmentation, preprocess_input_layer, MODEL_ARCH)
 
 # --- Compile the Model ---
 # Using a lower learning rate for transfer learning is often beneficial
@@ -396,15 +551,16 @@ def get_next_model_version(base_filename, model_dir):
     """Finds the next available version number for a model filename."""
     version = 1
     while True:
-        # Check for both .keras and older .h5 formats if necessary, though we use .keras
         potential_filename_keras = os.path.join(model_dir, f"{base_filename}_v{version}.keras")
         if not os.path.exists(potential_filename_keras):
             return version
         version += 1
 
-version_number = get_next_model_version("fruit_classifier_best", base_dir)
-checkpoint_base_name = f"fruit_classifier_best_v{version_number}"
-final_model_base_name = f"fruit_classifier_final_v{version_number}"
+# Include architecture in model filename for clarity
+model_base_name = f"fruit_classifier_{MODEL_ARCH}_best"
+version_number = get_next_model_version(model_base_name, base_dir)
+checkpoint_base_name = f"{model_base_name}_v{version_number}"
+final_model_base_name = f"fruit_classifier_{MODEL_ARCH}_final_v{version_number}"
 
 checkpoint_path = os.path.join(base_dir, f"{checkpoint_base_name}.keras")
 final_model_path = os.path.join(base_dir, f"{final_model_base_name}.keras")
@@ -413,30 +569,26 @@ print(f"\nModels will be saved with version: {version_number}")
 print(f"Best model checkpoint path: {checkpoint_path}")
 print(f"Final model path: {final_model_path}")
 
-
-# --- Callbacks ---
-# EarlyStopping
 early_stopping = tf.keras.callbacks.EarlyStopping(
     monitor='val_loss',
-    patience=3, # Number of epochs with no improvement after which training will be stopped
+    patience=3,
     verbose=1,
-    restore_best_weights=True # Restores model weights from the epoch with the best value of the monitored quantity.
+    restore_best_weights=True
 )
 
-# ModelCheckpoint to save the best model
-# The path should be inside 'fruit_classifier_project'
-# checkpoint_path = os.path.join(base_dir, "fruit_classifier_best.keras") # Save in .keras format
 model_checkpoint = tf.keras.callbacks.ModelCheckpoint(
     filepath=checkpoint_path,
-    save_best_only=True, # Only save a model if `val_loss` has improved
+    save_best_only=True,
     monitor='val_loss',
     verbose=1
 )
 
-# --- Train the Model ---
-EPOCHS = 50 # Start with a reasonable number, EarlyStopping will handle if it's too much
-
+EPOCHS = 50
 print(f"\nStarting training for {EPOCHS} epochs...")
+print(f"Device: {device_info}")
+if gpus or mps_devices:
+    print("Mixed precision training enabled - this should speed up training significantly.")
+    print("Note: Training time will depend on dataset size, model complexity, and hardware.")
 
 history = model.fit(
     train_dataset,
@@ -447,45 +599,35 @@ history = model.fit(
 
 print("\nTraining complete.")
 
-# --- Evaluate the Model ---
 print("\nEvaluating model on the test set...")
 test_loss, test_accuracy = model.evaluate(test_dataset)
 print(f"Test Loss: {test_loss}")
 print(f"Test Accuracy: {test_accuracy}")
 
-# --- Plotting Training History (Optional but recommended) ---
 acc = history.history['accuracy']
-val_acc = history.history['val_accuracy']  # Fixed: was 'validation_accuracy'
+val_acc = history.history['val_accuracy']
 loss = history.history['loss']
-val_loss = history.history['val_loss']     # Fixed: was 'validation_loss'
-epochs_range = range(len(acc)) # Use actual number of epochs run if early stopping occurred
+val_loss = history.history['val_loss']
+epochs_range = range(len(acc))
 
 plt.figure(figsize=(12, 4))
 plt.subplot(1, 2, 1)
 plt.plot(epochs_range, acc, label='Training Accuracy')
 plt.plot(epochs_range, val_acc, label='Validation Accuracy')
 plt.legend(loc='lower right')
-plt.title('Training and Validation Accuracy')
-history_plot_path_acc = os.path.join(base_dir, 'training_validation_accuracy.png')
+plt.title(f'Training and Validation Accuracy ({MODEL_ARCH.upper()})')
+history_plot_path_acc = os.path.join(base_dir, f'training_validation_accuracy_{MODEL_ARCH}.png')
 plt.savefig(history_plot_path_acc)
 print(f"Saved accuracy plot to {history_plot_path_acc}")
-
 
 plt.subplot(1, 2, 2)
 plt.plot(epochs_range, loss, label='Training Loss')
 plt.plot(epochs_range, val_loss, label='Validation Loss')
 plt.legend(loc='upper right')
-plt.title('Training and Validation Loss')
-history_plot_path_loss = os.path.join(base_dir, 'training_validation_loss.png')
+plt.title(f'Training and Validation Loss ({MODEL_ARCH.upper()})')
+history_plot_path_loss = os.path.join(base_dir, f'training_validation_loss_{MODEL_ARCH}.png')
 plt.savefig(history_plot_path_loss)
-print(f"Saved loss plot to {history_plot_path_loss}")
-# plt.show() # Comment out if running in a non-GUI environment
 
-# --- Save the trained model ---
-# The best model is already saved by ModelCheckpoint if restore_best_weights=True was used with EarlyStopping
-# and save_best_only=True with ModelCheckpoint.
-# If you want to save the final state regardless:
-# final_model_path = os.path.join(base_dir, "fruit_classifier_final.keras")
 model.save(final_model_path)
 print(f"Final model saved to {final_model_path}")
 print(f"Best model (during training) saved to {checkpoint_path}")
