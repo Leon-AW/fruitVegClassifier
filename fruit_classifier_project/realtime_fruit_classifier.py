@@ -3,35 +3,113 @@ import tensorflow as tf
 import numpy as np
 import os
 import time
+import sys # ADDED for command-line arguments
 
-# --- Constants ---
-IMG_WIDTH = 100
-IMG_HEIGHT = 100
+# --- Argument Parsing ---
+# Defaults
+IMG_WIDTH_ARG = 224
+IMG_HEIGHT_ARG = 224
+MODEL_PATH_ARG = None
+DATASET_FOLDER_ARG = 'fruits-360-original-size'
+DATASET_ARCHIVE_NAME_ARG = 'fruits-360_original-size'
+
+i = 1
+while i < len(sys.argv):
+    arg = sys.argv[i]
+    if arg == "res" and i + 1 < len(sys.argv):
+        if sys.argv[i+1] == "100":
+            IMG_WIDTH_ARG = 100
+            IMG_HEIGHT_ARG = 100
+            DATASET_FOLDER_ARG = 'fruits-360'
+            DATASET_ARCHIVE_NAME_ARG = 'fruits-360_100x100'
+            print("Configuration: Using 100x100 resolution.")
+        else:
+            print(f"Warning: Unrecognized value '{sys.argv[i+1]}' for 'res' argument. Using default 224x224.")
+        i += 2
+    elif arg == "model" and i + 1 < len(sys.argv):
+        MODEL_PATH_ARG = sys.argv[i+1]
+        print(f"Configuration: Attempting to load specified model: {MODEL_PATH_ARG}")
+        i += 2
+    else:
+        print(f"Warning: Unrecognized argument or missing value: {arg}")
+        i += 1
+
+# --- Constants based on Arguments ---
+IMG_WIDTH = IMG_WIDTH_ARG
+IMG_HEIGHT = IMG_HEIGHT_ARG
 IMAGE_SIZE = (IMG_WIDTH, IMG_HEIGHT)
 
-# --- Load Class Names (same logic as training script) ---
-# This assumes the script is run from within fruit_classifier_project
+# --- Load Class Names (dynamically based on selected dataset) ---
 base_dir = os.path.dirname(os.path.abspath(__file__))
-dataset_base_parent_dir = os.path.join(base_dir, 'fruits-360_100x100', 'fruits-360') # Path to where Training/Test folders are
-train_dir_for_classes = os.path.join(dataset_base_parent_dir, 'Training')
+dataset_train_path = os.path.join(base_dir, DATASET_ARCHIVE_NAME_ARG, DATASET_FOLDER_ARG, 'Training')
 
+class_names = []
 try:
-    class_names = sorted(os.listdir(train_dir_for_classes))
-    class_names = [name for name in class_names if os.path.isdir(os.path.join(train_dir_for_classes, name))]
+    if not os.path.isdir(dataset_train_path):
+        raise FileNotFoundError(f"Training directory for class names not found: {dataset_train_path}")
+    loaded_class_names = sorted(os.listdir(dataset_train_path))
+    class_names = [name for name in loaded_class_names if os.path.isdir(os.path.join(dataset_train_path, name))]
     if not class_names:
-        raise ValueError("No class subdirectories found. Cannot determine class names.")
+        raise ValueError(f"No class subdirectories found in {dataset_train_path}. Cannot determine class names.")
     NUM_CLASSES = len(class_names)
-    print(f"Loaded {NUM_CLASSES} class names. First few: {class_names[:5]}")
+    print(f"Loaded {NUM_CLASSES} class names. First few: {class_names[:5]} (from {DATASET_ARCHIVE_NAME_ARG})")
 except Exception as e:
     print(f"Error loading class names: {e}")
-    print("Please ensure the 'fruits-360_100x100/fruits-360/Training' directory exists relative to this script.")
+    print(f"Please ensure the dataset specified by DATASET_ARCHIVE_NAME_ARG='{DATASET_ARCHIVE_NAME_ARG}' is available.")
     exit()
 
 # --- Load the Trained Model ---
-model_path = os.path.join(base_dir, "fruit_classifier_best.keras")
-print(f"Loading model from: {model_path}")
+def find_latest_model(model_dir_search, base_model_name="fruit_classifier_best_v"):
+    """Finds the latest .keras model file based on version number."""
+    latest_version = -1
+    latest_model_path = None
+    try:
+        for f_name in os.listdir(model_dir_search):
+            if f_name.startswith(base_model_name) and f_name.endswith(".keras"):
+                try:
+                    version_str = f_name[len(base_model_name):-len(".keras")]
+                    version = int(version_str)
+                    if version > latest_version:
+                        latest_version = version
+                        latest_model_path = os.path.join(model_dir_search, f_name)
+                except ValueError:
+                    continue # Not a correctly formatted version number
+    except FileNotFoundError:
+        pass # model_dir_search might not exist
+    
+    # Fallback if no versioned model is found, try the non-versioned name
+    if not latest_model_path:
+        potential_fallback = os.path.join(model_dir_search, "fruit_classifier_best.keras")
+        if os.path.exists(potential_fallback):
+            print(f"No versioned model found in {model_dir_search}, using fallback: {potential_fallback}")
+            return potential_fallback
+            
+    if latest_model_path:
+        print(f"Found latest model in {model_dir_search}: {latest_model_path}")
+    return latest_model_path
+
+model_to_load_path = None
+if MODEL_PATH_ARG:
+    # If MODEL_PATH_ARG is not absolute, assume it's relative to base_dir
+    if not os.path.isabs(MODEL_PATH_ARG):
+        model_to_load_path = os.path.join(base_dir, MODEL_PATH_ARG)
+    else:
+        model_to_load_path = MODEL_PATH_ARG
+else:
+    model_to_load_path = find_latest_model(base_dir)
+
+if not model_to_load_path or not os.path.exists(model_to_load_path):
+    print(f"Error: Model file not found.")
+    if MODEL_PATH_ARG:
+        print(f"  Specified model path: {model_to_load_path}")
+    else:
+        print(f"  Searched in {base_dir} for latest or fallback model.")
+    print("Please ensure the model file exists or a trained model is available.")
+    exit()
+
+print(f"Loading model from: {model_to_load_path}")
 try:
-    model = tf.keras.models.load_model(model_path)
+    model = tf.keras.models.load_model(model_to_load_path)
     print("Model loaded successfully.")
     model.summary() # Print model summary to verify
 except Exception as e:

@@ -4,26 +4,63 @@ from tensorflow.keras import layers
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import sys # ADDED
 import glob # Added for finding background files
 import cv2 # Added for OpenCV image processing
 
+# --- Base Directory ---
+base_dir = os.path.dirname(os.path.abspath(__file__))
+
+# --- Configuration based on Command Line Argument ---
+# Default to original size (224x224)
+IMG_WIDTH_DEFAULT = 224
+IMG_HEIGHT_DEFAULT = 224
+DATASET_NAME_DEFAULT = 'fruits-360_original-size'
+DATASET_FOLDER_DEFAULT = 'fruits-360-original-size' # Subfolder within the archive name
+BACKGROUNDS_DIR_NAME_DEFAULT = 'backgrounds'
+HAS_DEDICATED_VALIDATION_DEFAULT = True
+
+# Check for '100' argument for 100x100 version
+if len(sys.argv) > 1 and sys.argv[1] == '100':
+    print("Using 100x100 dataset configuration.")
+    IMG_WIDTH_CFG = 100
+    IMG_HEIGHT_CFG = 100
+    DATASET_NAME_CFG = 'fruits-360_100x100'
+    DATASET_FOLDER_CFG = 'fruits-360' # Subfolder for 100x100 dataset
+    BACKGROUNDS_DIR_NAME_CFG = 'backgrounds100x100'
+    HAS_DEDICATED_VALIDATION_CFG = False
+else:
+    print("Using default (original size) dataset configuration.")
+    IMG_WIDTH_CFG = IMG_WIDTH_DEFAULT
+    IMG_HEIGHT_CFG = IMG_HEIGHT_DEFAULT
+    DATASET_NAME_CFG = DATASET_NAME_DEFAULT
+    DATASET_FOLDER_CFG = DATASET_FOLDER_DEFAULT
+    BACKGROUNDS_DIR_NAME_CFG = BACKGROUNDS_DIR_NAME_DEFAULT
+    HAS_DEDICATED_VALIDATION_CFG = HAS_DEDICATED_VALIDATION_DEFAULT
+
 # --- Constants ---
-IMG_WIDTH = 224
-IMG_HEIGHT = 224
+IMG_WIDTH = IMG_WIDTH_CFG
+IMG_HEIGHT = IMG_HEIGHT_CFG
 IMAGE_SIZE = (IMG_WIDTH, IMG_HEIGHT)
-BATCH_SIZE = 32
+BATCH_SIZE = 32 # This can be made configurable too if needed in future
 BUFFER_SIZE = tf.data.AUTOTUNE
 
-# Paths
-base_dir = os.path.dirname(os.path.abspath(__file__))
-dataset_base_dir = os.path.join(base_dir, 'fruits-360_original-size', 'fruits-360-original-size')
+# Paths (derived from config)
+# base_dir is defined above
+dataset_base_dir = os.path.join(base_dir, DATASET_NAME_CFG, DATASET_FOLDER_CFG)
 train_dir = os.path.join(dataset_base_dir, 'Training')
-validation_dir = os.path.join(dataset_base_dir, 'Validation')
 test_dir = os.path.join(dataset_base_dir, 'Test')
+
+if HAS_DEDICATED_VALIDATION_CFG:
+    validation_dir = os.path.join(dataset_base_dir, 'Validation')
+else:
+    print(f"No dedicated validation set for {DATASET_NAME_CFG}. Using Test set for validation during training.")
+    validation_dir = test_dir # Use Test set as validation for 100x100 dataset
+
 user_corrected_data_path = os.path.join(base_dir, "user_corrected_data")
 
 # --- Background Images Path ---
-backgrounds_dir = os.path.join(base_dir, 'backgrounds')
+backgrounds_dir = os.path.join(base_dir, BACKGROUNDS_DIR_NAME_CFG)
 background_image_paths = glob.glob(os.path.join(backgrounds_dir, '*.jpg')) # Assumes JPEGs, add more patterns if needed e.g., '*.png'
 background_image_paths.extend(glob.glob(os.path.join(backgrounds_dir, '*.png')))
 
